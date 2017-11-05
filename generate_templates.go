@@ -217,7 +217,14 @@ func main() {
 			return nil
 		}
 		filename := filepath.Base(path)
-		if ok, _ := filepath.Match("output*.GIF", filename); ok {
+		ok, _ := filepath.Match("output*.GIF", filename)
+		if !ok {
+			ok, _ = filepath.Match("Motion-Still*.gif", filename)
+		}
+		if !ok {
+			ok, _ = filepath.Match("Motion-Still*.GIF", filename)
+		}
+		if ok {
 			hash, err := fileHash(path)
 			if err != nil {
 				return err
@@ -295,7 +302,12 @@ func main() {
 		}
 		of.Close()
 		if i == len(grouped)-1 {
-			os.Symlink(htmlname, filepath.Join(*targetDir, "index.html"))
+			log.Printf("symlinking index.html to %s", htmlname)
+			os.Remove(filepath.Join(*targetDir, "index.html"))
+			err = os.Symlink(htmlname, filepath.Join(*targetDir, "index.html"))
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
 	}
 }
