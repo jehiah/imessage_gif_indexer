@@ -1,18 +1,25 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"os"
+	"os/user"
+	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
 type Link struct {
-	URL string
+	URL  string
 	Time time.Time
 }
 
@@ -22,7 +29,7 @@ func ParseLink(yyyymm string) *Link {
 		panic(err.Error())
 	}
 	return &Link{
-		URL: fmt.Sprintf("%s.html", yyyymm),
+		URL:  fmt.Sprintf("%s.html", yyyymm),
 		Time: t,
 	}
 }
@@ -33,7 +40,6 @@ type Page struct {
 	Previous *Link
 	Next     *Link
 }
-
 
 const tpl = `<!DOCTYPE html>
 <html>
@@ -80,15 +86,167 @@ const tpl = `<!DOCTYPE html>
 	</body>
 </html>`
 
+func existingFiles(dir string) (map[string]bool, error) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	files, err := d.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[string]bool)
+	for _, filename := range files {
+		if !strings.HasSuffix(filename, ".gif") {
+			continue
+		}
+		hash, err := fileHash(filepath.Join(dir, filename))
+		if err != nil {
+			return nil, err
+		}
+		found[hash] = true
+	}
+	return found, nil
+}
+
+// return the sha1 of the bytes of a file
+func fileHash(filename string) (string, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha1.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func NewGifName(sourcefile string) (string, error) {
+	fi, err := os.Stat(sourcefile)
+	if err != nil {
+		return "", err
+	}
+	modifyTime := fi.ModTime()
+	stat := fi.Sys().(*syscall.Stat_t)
+	ctime := time.Unix(int64(stat.Ctimespec.Sec), int64(stat.Ctimespec.Nsec))
+	if modifyTime.Before(ctime) {
+		ctime = modifyTime
+	}
+	return ctime.Format("20060102_150405_") + randStr(6) + ".gif", nil
+}
+
+var cleaner = strings.NewReplacer("-", "", "_", "")
+
+func randStr(size int) string {
+	var randomness string
+	for i := 0; i < 5; i++ {
+		b := make([]byte, size)
+		_, err := rand.Read(b)
+		if err != nil {
+			log.Panicf("ERROR: failed to read %d random bytes for shortid: %s", size, err)
+		}
+		randomness = cleaner.Replace(base64.RawURLEncoding.EncodeToString(b))
+		if len(randomness) >= 6 {
+			randomness = randomness[:6]
+		}
+		if len(randomness) == 6 {
+			break
+		}
+	}
+	if len(randomness) != 6 {
+		log.Panic("ERROR: failed generating shortid")
+	}
+	return randomness
+}
+
+// Copy the src file to dst. Any existing file will be overwritten and will not
+// copy file attributes.
+func Copy(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	if err != nil {
+		return err
+	}
+	return out.Close()
+}
+
 func main() {
+	targetDir := flag.String("dir", ".", "target directory")
 	flag.Parse()
+
+	if *targetDir == "" {
+		log.Fatal("missing --dir")
+	}
+
+	u, err := user.Current()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	t, err := template.New("webpage").Parse(tpl)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	d, err := os.Open(".")
+	existingHashes, err := existingFiles(*targetDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%d existing *.gif files in %s", len(existingHashes), *targetDir)
+
+	// find Gifs
+	var newGifs []string
+	filepath.Walk(filepath.Join(u.HomeDir, "Library/Messages/Attachments"), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		filename := filepath.Base(path)
+		if ok, _ := filepath.Match("output*.GIF", filename); ok {
+			hash, err := fileHash(path)
+			if err != nil {
+				return err
+			}
+			if existingHashes[hash] {
+				log.Printf("Already have %s - %s", path, hash)
+				return nil
+			}
+			newGifs = append(newGifs, path)
+		}
+		return nil
+	})
+
+	// move new files
+	log.Printf("found %d new files", len(newGifs))
+	for _, newGif := range newGifs {
+		newGifFilename, err := NewGifName(newGif)
+		if err != nil {
+			log.Fatal(err)
+		}
+		newGifFilename = filepath.Join(*targetDir, newGifFilename)
+		log.Printf("copying %s to %s", newGif, newGifFilename)
+		err = Copy(newGif, newGifFilename)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	d, err := os.Open(*targetDir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -113,7 +271,7 @@ func main() {
 	for i, yyyymm := range grouped {
 		ts, err := time.Parse("200601", yyyymm)
 		if err != nil {
-			panic(err.Error())
+			log.Fatal(err)
 		}
 		htmlname := fmt.Sprintf("%s.html", yyyymm)
 		page := Page{
@@ -127,7 +285,7 @@ func main() {
 			page.Next = ParseLink(grouped[i+1])
 		}
 		log.Printf("creating %s for %d images", htmlname, len(page.Images))
-		of, err := os.Create(htmlname)
+		of, err := os.Create(filepath.Join(*targetDir, htmlname))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -137,7 +295,7 @@ func main() {
 		}
 		of.Close()
 		if i == len(grouped)-1 {
-			os.Symlink(htmlname, "index.html")
+			os.Symlink(htmlname, filepath.Join(*targetDir, "index.html"))
 		}
 	}
 }
