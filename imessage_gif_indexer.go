@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -34,9 +36,32 @@ func ParseLink(yyyymm string) *Link {
 	}
 }
 
+type Image struct {
+	Filename, SmallFile string
+	Size, SmallSize     int64
+}
+
+func NewImage(path, filename string) Image {
+	fi, err := os.Stat(filepath.Join(path, filename))
+	if err != nil {
+		log.Fatal(err)
+	}
+	small := strings.Replace(filename, ".gif", "_sm.gif", 1)
+	sfi, err := os.Stat(filepath.Join(path, small))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return Image{
+		Filename:  filename,
+		SmallFile: small,
+		Size:      fi.Size() / 1024,
+		SmallSize: sfi.Size()/ 1024,
+	}
+}
+
 type Page struct {
 	Title    string
-	Images   []string
+	Images   []Image
 	Previous *Link
 	Next     *Link
 }
@@ -78,7 +103,13 @@ const tpl = `<!DOCTYPE html>
 			<h1>{{.Title}}</h1>
 			{{if .Next }}<a href="{{.Next.URL}}"><button>{{.Next.Time.Format "Jan 2006"}} &rarr;</button></a>{{end}}
 		</div>
-		{{range .Images}}<div class="image-block"><a href="{{.}}"><img src="{{ . }}" alt="{{.}}"></a><br/><span class="alt">{{.}}</span></div>{{end}}
+		{{range .Images}}
+			<div class="image-block">
+				<a href="{{.SmallFile}}"><img src="{{ .SmallFile }}" alt="{{.SmallFile}}"></a><br/>
+				<span class="alt"><a href="{{.Filename}}">{{.Filename}}</a> size:{{.Size}}k</span><br/>
+				<span class="alt"><a href="{{.SmallFile}}">{{.SmallFile}}</a> size:{{.SmallSize}}k</span><br/>
+			</div>
+		{{end}}
 		<p>
 			{{if .Previous }}<a href="{{.Previous.URL}}"><button>&larr; {{.Previous.Time.Format "Jan 2006"}}</button></a>{{end}}
 			{{if .Next }}<a href="{{.Next.URL}}"><button>{{.Next.Time.Format "Jan 2006"}} &rarr;</button></a>{{end}}
@@ -262,17 +293,45 @@ func main() {
 		log.Fatal(err)
 	}
 	sort.Strings(files)
-	data := make(map[string][]string)
-	var grouped []string
+
+	// generate missing optimized gif's using gifsicle
+	// https://github.com/kornelski/giflossy
+	// https://kornel.ski/lossygif
+	allFiles := make(map[string]bool)
+	for _, filename := range files {
+		allFiles[filename] = true
+	}
 	for _, filename := range files {
 		if !strings.HasSuffix(filename, ".gif") {
+			continue
+		}
+		if strings.HasSuffix(filename, "_sm.gif") {
+			continue
+		}
+		small := strings.Replace(filename, ".gif", "_sm.gif", 1)
+		if allFiles[small] {
+			continue
+		}
+		log.Printf("optimizing %s", filename)
+		cmd := exec.Command("gifsicle", "-O3", "--lossy=30", "-o", filepath.Join(*targetDir, small), filepath.Join(*targetDir, filename))
+		cmd.Stderr = ioutil.Discard
+		err = cmd.Run()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	data := make(map[string][]Image)
+	var grouped []string
+	for _, filename := range files {
+		if !strings.HasSuffix(filename, ".gif") || strings.HasSuffix(filename, "_sm.gif") {
 			continue
 		}
 		yearmonth := filename[:6]
 		if _, ok := data[yearmonth]; !ok {
 			grouped = append(grouped, yearmonth)
 		}
-		data[yearmonth] = append(data[yearmonth], filename)
+		data[yearmonth] = append(data[yearmonth], NewImage(*targetDir, filename))
 	}
 
 	for i, yyyymm := range grouped {
