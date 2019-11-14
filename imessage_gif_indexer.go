@@ -214,17 +214,57 @@ func Copy(src, dst string) error {
 	return out.Close()
 }
 
+func finder(newGifs chan <- string, existingHashes map[string]bool) {
+	defer close(newGifs)
+	// find Gifs
+	u, err := user.Current()
+	if err != nil {
+		log.Fatal(err)
+	}
+	
+	for _, baseDir := range []string {
+		filepath.Join(u.HomeDir, "Library/Messages/Attachments"),
+		"/private/var/folders",
+		} {
+			filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				log.Printf("%s",err)
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			log.Printf("%s", path)
+			filename := filepath.Base(path)
+			ok, _ := filepath.Match("output*.GIF", filename)
+			if !ok {
+				ok, _ = filepath.Match("Motion-Still*.gif", filename)
+			}
+			if !ok {
+				ok, _ = filepath.Match("Motion-Still*.GIF", filename)
+			}
+			if ok {
+				hash, err := fileHash(path)
+				if err != nil {
+					return err
+				}
+				if existingHashes[hash] {
+					log.Printf("Already have %s - %s", path, hash)
+					return nil
+				}
+				newGifs <- path
+			}
+			return nil
+		})
+	}
+}
+
 func main() {
 	targetDir := flag.String("dir", ".", "target directory")
 	flag.Parse()
 
 	if *targetDir == "" {
 		log.Fatal("missing --dir")
-	}
-
-	u, err := user.Current()
-	if err != nil {
-		log.Fatal(err)
 	}
 
 	t, err := template.New("webpage").Parse(tpl)
@@ -238,40 +278,14 @@ func main() {
 	}
 	log.Printf("%d existing *.gif files in %s", len(existingHashes), *targetDir)
 
-	// find Gifs
-	var newGifs []string
-	filepath.Walk(filepath.Join(u.HomeDir, "Library/Messages/Attachments"), func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		filename := filepath.Base(path)
-		ok, _ := filepath.Match("output*.GIF", filename)
-		if !ok {
-			ok, _ = filepath.Match("Motion-Still*.gif", filename)
-		}
-		if !ok {
-			ok, _ = filepath.Match("Motion-Still*.GIF", filename)
-		}
-		if ok {
-			hash, err := fileHash(path)
-			if err != nil {
-				return err
-			}
-			if existingHashes[hash] {
-				log.Printf("Already have %s - %s", path, hash)
-				return nil
-			}
-			newGifs = append(newGifs, path)
-		}
-		return nil
-	})
-
+	
+	newGifs := make(chan string)
+	go finder(newGifs, existingHashes)
+	
 	// move new files
-	log.Printf("found %d new files", len(newGifs))
-	for _, newGif := range newGifs {
+	found := 0
+	for newGif := range newGifs {
+		found++
 		newGifFilename, err := NewGifName(newGif)
 		if err != nil {
 			log.Fatal(err)
@@ -283,6 +297,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	log.Printf("found %d new files", found)
 
 	d, err := os.Open(*targetDir)
 	if err != nil {
